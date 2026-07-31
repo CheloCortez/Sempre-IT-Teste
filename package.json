@@ -6,12 +6,14 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
+    "leaflet": "^1.9.4",
     "pocketbase": "latest"
   },
   "devDependencies": {
+    "@types/leaflet": "^1.9.21",
+    "typescript": "latest",
     "vite": "latest",
-    "wrangler": "latest",
-    "typescript": "latest"
+    "wrangler": "latest"
   },
   "name": "pocketbase-frontend",
   "private": true,
