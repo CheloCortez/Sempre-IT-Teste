@@ -7,6 +7,7 @@ type VenueCoverageStatus = 'coberta' | 'aberta' | 'nao_confirmada';
 type Coverage = 'all' | 'indoor' | 'outdoor';
 type CrowdLevel = 'vazia' | 'moderada' | 'cheia';
 type SkillRange = 'iniciante' | 'intermediario' | 'avancado' | 'misto';
+type SuggestionKind = 'nova_quadra' | 'correcao';
 
 interface Venue {
   id: string;
@@ -187,6 +188,7 @@ root.innerHTML = `
             <h2>Quadras</h2>
             <p id="result-count" aria-live="polite">Buscando locais ativos…</p>
           </div>
+          <button id="suggest-venue" class="directory-suggestion-button" type="button">Falta uma quadra?</button>
         </div>
         <div id="directory" class="directory" aria-busy="true">
           <div class="status-state loading-state" role="status">
@@ -213,6 +215,7 @@ const clearFiltersButton = getElement<HTMLButtonElement>('clear-filters');
 const fitMapButton = getElement<HTMLButtonElement>('fit-map');
 const resultCount = getElement<HTMLElement>('result-count');
 const mapSummary = getElement<HTMLElement>('map-summary');
+const suggestVenueButton = getElement<HTMLButtonElement>('suggest-venue');
 const dialog = getElement<HTMLDialogElement>('venue-dialog');
 const dialogContent = getElement<HTMLElement>('dialog-content');
 
@@ -267,6 +270,7 @@ function attachEvents() {
   });
 
   fitMapButton.addEventListener('click', () => fitMapToVenues(getFilteredVenues()));
+  suggestVenueButton.addEventListener('click', () => openSuggestionForm('nova_quadra', undefined, suggestVenueButton));
 
   dialog.addEventListener('click', (event) => {
     if (event.target === dialog) dialog.close();
@@ -584,9 +588,17 @@ function renderVenueDetail(venue: Venue, formMessage?: { type: 'success' | 'erro
         </a>
       ` : '<p class="source-unavailable">Link da fonte não disponível.</p>'}
     </div>
+
+    <div class="detail-correction">
+      <p>Encontrou um dado desatualizado?</p>
+      <button class="detail-correction-button" type="button">Corrigir informações desta quadra</button>
+    </div>
   `;
 
   dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.addEventListener('click', () => dialog.close());
+  dialogContent.querySelector<HTMLButtonElement>('.detail-correction-button')?.addEventListener('click', () => {
+    openSuggestionForm('correcao', venue);
+  });
   dialogContent.querySelector<HTMLFormElement>('#checkin-form')?.addEventListener('submit', (event) => {
     event.preventDefault();
     const form = event.currentTarget;
@@ -744,6 +756,218 @@ function renderRadioOption(name: string, value: string, label: string, required 
       <span>${label}</span>
     </label>
   `;
+}
+
+function openSuggestionForm(kind: SuggestionKind, venue?: Venue, trigger?: HTMLElement) {
+  const wasOpen = dialog.open;
+  if (!wasOpen) {
+    detailTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  }
+  openVenueId = venue?.id ?? null;
+  renderSuggestionForm(kind, venue);
+  if (!wasOpen) dialog.showModal();
+  dialogContent.querySelector<HTMLInputElement>('#suggestion-name')?.focus();
+}
+
+function renderSuggestionForm(kind: SuggestionKind, venue?: Venue, submitted = false) {
+  clearCooldownTimer();
+  const isCorrection = kind === 'correcao';
+  const title = isCorrection ? 'Corrigir informações da quadra' : 'Sugerir uma nova quadra';
+  const confirmation = isCorrection
+    ? 'Recebemos sua correção. Vamos conferir as informações antes de atualizar a quadra.'
+    : 'Recebemos sua sugestão. Vamos conferir as informações antes de publicar a quadra.';
+
+  dialogContent.innerHTML = `
+    <div class="dialog-header suggestion-dialog-header">
+      <div>
+        <p class="dialog-neighborhood">Ajude quem joga em São Paulo</p>
+        <h2 id="dialog-title">${title}</h2>
+      </div>
+      <button class="dialog-close" type="button" aria-label="Fechar sugestão">×</button>
+    </div>
+
+    ${submitted ? `
+      <section id="suggestion-success" class="suggestion-success" role="status" tabindex="-1">
+        <span class="suggestion-success-symbol" aria-hidden="true">✓</span>
+        <div>
+          <h3>Sugestão enviada</h3>
+          <p>${confirmation}</p>
+        </div>
+      </section>
+      <div class="suggestion-complete-actions">
+        ${isCorrection && venue ? '<button class="secondary-button suggestion-back" type="button">Voltar aos detalhes</button>' : ''}
+        <button class="primary-button suggestion-close" type="button">Concluir</button>
+      </div>
+    ` : `
+      <p class="suggestion-intro">${isCorrection
+        ? 'Ajuste o que estiver incorreto. Nome e bairro são os únicos campos obrigatórios.'
+        : 'Conte onde fica. Nome e bairro são os únicos campos obrigatórios.'}</p>
+
+      <form id="suggestion-form" class="suggestion-form" novalidate>
+        <input type="hidden" name="kind" value="${kind}">
+        ${isCorrection && venue ? `<input type="hidden" name="venue" value="${escapeAttribute(venue.id)}">` : ''}
+
+        <div class="suggestion-form-grid">
+          <label class="suggestion-field">
+            <span>Nome da quadra *</span>
+            <input id="suggestion-name" name="name" type="text" maxlength="120" autocomplete="organization" required value="${escapeAttribute(venue?.name ?? '')}">
+          </label>
+
+          <label class="suggestion-field">
+            <span>Bairro *</span>
+            <input name="neighborhood" type="text" maxlength="100" autocomplete="address-level3" required value="${escapeAttribute(venue?.neighborhood ?? '')}">
+          </label>
+        </div>
+
+        <label class="suggestion-field">
+          <span>Endereço <em>opcional</em></span>
+          <input name="address" type="text" maxlength="180" autocomplete="street-address" value="${escapeAttribute(venue?.address ?? '')}" placeholder="Rua, número e complemento">
+        </label>
+
+        <label class="suggestion-field">
+          <span>Contato público ou fonte <em>opcional</em></span>
+          <input name="contact_or_source" type="text" maxlength="240" autocomplete="url" placeholder="Site, perfil público ou telefone do local">
+          <small>Envie apenas informações públicas que ajudem a confirmar o local.</small>
+        </label>
+
+        <label class="suggestion-field">
+          <span>${isCorrection ? 'O que precisa mudar' : 'Mais informações'} <em>opcional</em></span>
+          <textarea name="message" maxlength="600" rows="4" autocomplete="off" placeholder="${isCorrection ? 'Ex.: o número de quadras mudou' : 'Ex.: horários, forma de acesso ou como reservar'}"></textarea>
+        </label>
+
+        <div id="suggestion-status" class="suggestion-status" role="status" aria-live="polite" tabindex="-1"></div>
+
+        <div class="suggestion-submit-row">
+          <button class="primary-button suggestion-submit" type="submit">Enviar sugestão</button>
+          ${isCorrection && venue
+            ? '<button class="secondary-button suggestion-back" type="button">Voltar aos detalhes</button>'
+            : '<button class="secondary-button suggestion-cancel" type="button">Cancelar</button>'}
+        </div>
+      </form>
+    `}
+  `;
+
+  dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.addEventListener('click', () => dialog.close());
+  dialogContent.querySelector<HTMLButtonElement>('.suggestion-close')?.addEventListener('click', () => dialog.close());
+  dialogContent.querySelector<HTMLButtonElement>('.suggestion-cancel')?.addEventListener('click', () => dialog.close());
+  dialogContent.querySelectorAll<HTMLButtonElement>('.suggestion-back').forEach((button) => {
+    button.addEventListener('click', () => {
+      if (!venue) return;
+      renderVenueDetail(venue);
+      dialogContent.querySelector<HTMLButtonElement>('.detail-correction-button')?.focus();
+    });
+  });
+  dialogContent.querySelector<HTMLFormElement>('#suggestion-form')?.addEventListener('submit', (event) => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (form instanceof HTMLFormElement) void submitVenueSuggestion(form, kind, venue);
+  });
+
+  if (submitted) dialogContent.querySelector<HTMLElement>('#suggestion-success')?.focus();
+}
+
+async function submitVenueSuggestion(form: HTMLFormElement, kind: SuggestionKind, venue?: Venue) {
+  if (!form.reportValidity()) return;
+
+  const nameInput = form.querySelector<HTMLInputElement>('[name="name"]');
+  const neighborhoodInput = form.querySelector<HTMLInputElement>('[name="neighborhood"]');
+  const addressInput = form.querySelector<HTMLInputElement>('[name="address"]');
+  const contactInput = form.querySelector<HTMLInputElement>('[name="contact_or_source"]');
+  const messageInput = form.querySelector<HTMLTextAreaElement>('[name="message"]');
+  if (!nameInput || !neighborhoodInput) return;
+
+  const name = cleanSuggestionValue(nameInput.value);
+  const neighborhood = cleanSuggestionValue(neighborhoodInput.value);
+  const address = cleanSuggestionValue(addressInput?.value ?? '');
+  const contactOrSource = cleanSuggestionValue(contactInput?.value ?? '');
+  const message = cleanSuggestionValue(messageInput?.value ?? '', true);
+
+  nameInput.value = name;
+  neighborhoodInput.value = neighborhood;
+  if (addressInput) addressInput.value = address;
+  if (contactInput) contactInput.value = contactOrSource;
+  if (messageInput) messageInput.value = message;
+
+  if (!name || !neighborhood) {
+    setSuggestionStatus('error', 'Informe o nome da quadra e o bairro para continuar.');
+    (!name ? nameInput : neighborhoodInput).focus();
+    return;
+  }
+
+  const payload: Record<string, string> = { kind, name, neighborhood };
+  if (kind === 'correcao' && venue?.id) payload.venue = venue.id;
+  if (address) payload.address = address;
+  if (contactOrSource) payload.contact_or_source = contactOrSource;
+  if (message) payload.message = message;
+
+  const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input, textarea, button');
+  const submitButton = form.querySelector<HTMLButtonElement>('.suggestion-submit');
+  controls.forEach((control) => { control.disabled = true; });
+  if (submitButton) submitButton.textContent = 'Enviando sugestão…';
+  setSuggestionStatus('', '');
+
+  try {
+    await pb.collection('venue_suggestions').create(payload, { requestKey: null });
+    renderSuggestionForm(kind, venue, true);
+  } catch (error) {
+    controls.forEach((control) => { control.disabled = false; });
+    if (submitButton) submitButton.textContent = 'Enviar sugestão';
+    setSuggestionStatus('error', getSuggestionErrorMessage(error));
+    dialogContent.querySelector<HTMLElement>('#suggestion-status')?.focus();
+  }
+}
+
+function cleanSuggestionValue(value: string, multiline = false) {
+  const withoutNulls = value.replaceAll('\0', '');
+  return multiline
+    ? withoutNulls.replace(/\r\n?/g, '\n').trim()
+    : withoutNulls.replace(/\s+/g, ' ').trim();
+}
+
+function setSuggestionStatus(type: '' | 'error', message: string) {
+  const status = dialogContent.querySelector<HTMLElement>('#suggestion-status');
+  if (!status) return;
+  status.className = `suggestion-status${type ? ` is-${type}` : ''}`;
+  status.textContent = message;
+  status.setAttribute('role', type === 'error' ? 'alert' : 'status');
+}
+
+function getSuggestionErrorMessage(error: unknown) {
+  const candidate = error as {
+    status?: number;
+    message?: string;
+    data?: { message?: string; data?: Record<string, { message?: string }> };
+    response?: { message?: string; data?: Record<string, { message?: string }> };
+  };
+
+  if (candidate?.status === 429) {
+    return 'Você enviou uma sugestão há pouco. Aguarde 10 minutos antes de tentar novamente.';
+  }
+
+  if (candidate?.status === 400) {
+    const fieldErrors = candidate.response?.data ?? candidate.data?.data ?? {};
+    const fieldMessages: Record<string, string> = {
+      kind: 'Escolha um tipo de sugestão válido.',
+      venue: 'Não foi possível identificar a quadra que será corrigida.',
+      name: 'Informe o nome da quadra com até 120 caracteres.',
+      neighborhood: 'Informe o bairro com até 100 caracteres.',
+      address: 'O endereço deve ter até 180 caracteres.',
+      contact_or_source: 'O contato ou fonte deve ter até 240 caracteres.',
+      message: 'A mensagem deve ter até 600 caracteres.',
+    };
+    const readableFields = Object.keys(fieldErrors)
+      .map((field) => fieldMessages[field])
+      .filter((message): message is string => Boolean(message));
+    if (readableFields.length) return [...new Set(readableFields)].join(' ');
+
+    const backendMessage = candidate.response?.message ?? candidate.data?.message ?? '';
+    if (/quadra|bairro|endere[cç]o|corre[cç][aã]o|sugest[aã]o|aguarde|m[aá]ximo|obrigat/i.test(backendMessage)) {
+      return backendMessage;
+    }
+    return 'Confira os campos da sugestão e tente novamente.';
+  }
+
+  return 'Não foi possível enviar agora. Confira sua conexão e tente novamente.';
 }
 
 async function submitCheckin(form: HTMLFormElement, venue: Venue) {

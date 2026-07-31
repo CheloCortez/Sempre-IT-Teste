@@ -83,7 +83,9 @@ textarea:focus-visible,
 }
 
 button:disabled,
-select:disabled {
+select:disabled,
+input:disabled,
+textarea:disabled {
   cursor: not-allowed;
   opacity: 0.55;
 }
@@ -405,6 +407,25 @@ select:hover:not(:disabled) {
   background: var(--brand-pale);
 }
 
+.directory-suggestion-button {
+  min-height: 44px;
+  padding: 8px 11px;
+  border: 1px solid var(--brand);
+  border-radius: 9px;
+  background: var(--brand-pale);
+  color: var(--brand-dark);
+  font-size: 0.86rem;
+  font-weight: 700;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 160ms ease, border-color 160ms ease;
+}
+
+.directory-suggestion-button:hover {
+  border-color: var(--brand-dark);
+  background: oklch(0.885 0.062 158);
+}
+
 #map {
   width: 100%;
   min-height: 516px;
@@ -611,7 +632,7 @@ select:hover:not(:disabled) {
   color: oklch(0.99 0.005 155);
 }
 
-.primary-button:hover {
+.primary-button:hover:not(:disabled) {
   border-color: var(--brand);
   background: var(--brand);
 }
@@ -622,7 +643,7 @@ select:hover:not(:disabled) {
   color: var(--brand-dark);
 }
 
-.secondary-button:hover {
+.secondary-button:hover:not(:disabled) {
   border-color: var(--brand);
   background: var(--brand-pale);
 }
@@ -752,6 +773,178 @@ select:hover:not(:disabled) {
 .source-unavailable {
   color: var(--ink-soft);
   font-size: 0.88rem;
+}
+
+.detail-correction {
+  margin-top: 24px;
+  padding: 18px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  border-radius: 11px;
+  background: var(--surface-tint);
+}
+
+.detail-correction p {
+  color: var(--ink-soft);
+  font-size: 0.9rem;
+}
+
+.detail-correction-button {
+  min-height: 44px;
+  padding: 8px 0;
+  flex: 0 0 auto;
+  border: 0;
+  background: transparent;
+  color: var(--brand-dark);
+  font-weight: 700;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  cursor: pointer;
+}
+
+.detail-correction-button:hover {
+  color: var(--brand);
+}
+
+.suggestion-dialog-header h2 {
+  max-width: 520px;
+}
+
+.suggestion-intro {
+  max-width: 62ch;
+  margin-top: 18px;
+  color: var(--ink-soft);
+}
+
+.suggestion-form {
+  margin-top: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.suggestion-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.suggestion-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.suggestion-field > span {
+  color: var(--ink);
+  font-size: 0.86rem;
+  font-weight: 700;
+}
+
+.suggestion-field em {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  font-style: normal;
+  font-weight: 500;
+}
+
+.suggestion-field small {
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}
+
+.suggestion-field input,
+.suggestion-field textarea {
+  width: 100%;
+  min-height: 46px;
+  padding: 10px 12px;
+  border: 1px solid oklch(0.68 0.03 165);
+  border-radius: 9px;
+  background: var(--surface);
+  color: var(--ink);
+  transition: border-color 140ms ease, background-color 140ms ease;
+}
+
+.suggestion-field textarea {
+  min-height: 108px;
+  resize: vertical;
+  line-height: 1.45;
+}
+
+.suggestion-field input::placeholder,
+.suggestion-field textarea::placeholder {
+  color: oklch(0.46 0.025 175);
+  opacity: 1;
+}
+
+.suggestion-field input:hover:not(:disabled),
+.suggestion-field textarea:hover:not(:disabled) {
+  border-color: var(--brand);
+}
+
+.suggestion-status {
+  min-height: 0;
+  border-radius: 9px;
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
+.suggestion-status:not(:empty) {
+  min-height: 44px;
+  padding: 11px 13px;
+}
+
+.suggestion-status.is-error {
+  background: var(--critical-pale);
+  color: oklch(0.36 0.145 28);
+}
+
+.suggestion-submit-row,
+.suggestion-complete-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.suggestion-success {
+  margin-top: 28px;
+  padding: 18px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  border-radius: 11px;
+  background: var(--brand-pale);
+  color: var(--brand-dark);
+}
+
+.suggestion-success-symbol {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--brand-dark);
+  color: oklch(0.99 0.005 155);
+  font-weight: 800;
+}
+
+.suggestion-success h3 {
+  font-size: 1.1rem;
+  line-height: 1.25;
+}
+
+.suggestion-success p {
+  max-width: 54ch;
+  margin-top: 4px;
+}
+
+.suggestion-complete-actions {
+  margin-top: 20px;
 }
 
 .venue-activity {
@@ -1344,12 +1537,31 @@ select:hover:not(:disabled) {
     grid-column: 1 / -1;
   }
 
-  .dialog-actions {
+  .dialog-actions,
+  .suggestion-submit-row,
+  .suggestion-complete-actions {
     flex-direction: column;
   }
 
-  .dialog-actions a {
+  .dialog-actions a,
+  .suggestion-submit-row button,
+  .suggestion-complete-actions button {
     width: 100%;
+  }
+
+  .detail-correction {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .detail-correction-button {
+    width: 100%;
+    text-align: left;
+  }
+
+  .suggestion-form-grid {
+    grid-template-columns: 1fr;
   }
 
   .form-grid {
@@ -1394,6 +1606,16 @@ select:hover:not(:disabled) {
 
   .map-action {
     padding-inline: 10px;
+  }
+
+  .directory-heading {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 8px;
+  }
+
+  .directory-suggestion-button {
+    width: 100%;
   }
 }
 
