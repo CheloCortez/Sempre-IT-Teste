@@ -1,0 +1,44 @@
+[
+  {
+    "id": "pickleball-point-arena",
+    "name": "Pickleball Point Arena",
+    "neighborhood": "Chácara Santo Antônio / Brooklin",
+    "address": "Rua Antônio de Oliveira, 595, São Paulo - SP, 04718-050",
+    "lat": -23.6276,
+    "lng": -46.7043,
+    "courts": 3,
+    "surface": "hard",
+    "indoor": true,
+    "access_type": "reserva_e_aulas",
+    "notes_pt": "Arena dedicada com reserva e aulas; página do operador publica R$220/h de locação. Confiança alta.",
+    "source_url": "https://www.pickleballpoint.com.br/"
+  },
+  {
+    "id": "olimpia-arena-pickleball",
+    "name": "Olímpia Arena Pickleball",
+    "neighborhood": "Vila Olímpia",
+    "address": "Rua Quatá, 283, Vila Olímpia, São Paulo - SP, 04546-042",
+    "lat": -23.599044,
+    "lng": -46.676469,
+    "courts": 2,
+    "surface": "oficial_nao_especificada",
+    "indoor": null,
+    "access_type": "locacao_e_aulas",
+    "notes_pt": "Duas quadras oficiais; fontes divergem sobre cobertura, então indoor permanece nulo. Confiança alta.",
+    "source_url": "https://www.olimpiapickleball.com.br/"
+  },
+  {
+    "id": "reinaldo-junqueira-tennis",
+    "name": "Reinaldo Junqueira Tennis",
+    "neighborhood": "Vila Cordeiro",
+    "address": "Rua Francisco Dias Velho, 1033, Vila Cordeiro, São Paulo - SP, 04581-001",
+    "lat": -23.616078,
+    "lng": -46.692154,
+    "courts": null,
+    "surface": null,
+    "indoor": null,
+    "access_type": "locacao_por_hora",
+    "notes_pt": "Listagem pública e matéria de 2023 confirmam pickleball/locação; revalidar estrutura e preço. Confiança média.",
+    "source_url": "https://masasports.com.br/pages/quadras-de-pickleball"
+  }
+]
