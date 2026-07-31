@@ -756,24 +756,33 @@ async function submitCheckin(form: HTMLFormElement, venue: Venue) {
     return;
   }
 
-  const data = new FormData(form);
+  const playersInput = form.querySelector<HTMLInputElement>('[name="players_now"]');
+  const waitInput = form.querySelector<HTMLInputElement>('[name="wait_minutes"]');
+  const crowdInput = form.querySelector<HTMLInputElement>('input[name="crowd_level"]:checked');
+  const skillInput = form.querySelector<HTMLInputElement>('input[name="skill_range"]:checked');
+  const displayNameInput = form.querySelector<HTMLInputElement>('[name="display_name"]');
+  const noteInput = form.querySelector<HTMLTextAreaElement>('[name="note"]');
+
+  if (!playersInput || !crowdInput || !skillInput) return;
+
+  const players = Number(playersInput.value);
+  const waitValue = waitInput?.value.trim() ?? '';
+  const displayName = displayNameInput?.value.trim() ?? '';
+  const note = noteInput?.value.trim() ?? '';
+  const payload: Record<string, string | number> = {
+    venue: venue.id,
+    players_now: players,
+    crowd_level: crowdInput.value,
+    skill_range: skillInput.value,
+  };
+
+  if (waitValue) payload.wait_minutes = Number(waitValue);
+
   const submitButton = form.querySelector<HTMLButtonElement>('.checkin-submit');
   const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input, textarea, button');
   controls.forEach((control) => { control.disabled = true; });
   if (submitButton) submitButton.textContent = 'Enviando relato…';
   setFormStatus('', '');
-  const players = Number(data.get('players_now'));
-  const waitValue = String(data.get('wait_minutes') ?? '').trim();
-  const payload: Record<string, string | number> = {
-    venue: venue.id,
-    players_now: players,
-    crowd_level: String(data.get('crowd_level')),
-    skill_range: String(data.get('skill_range')),
-  };
-
-  if (waitValue) payload.wait_minutes = Number(waitValue);
-  const displayName = String(data.get('display_name') ?? '').trim();
-  const note = String(data.get('note') ?? '').trim();
   if (displayName) payload.display_name = displayName;
   if (note) payload.note = note;
 
