@@ -18,6 +18,8 @@
   --ball: oklch(0.87 0.17 109);
   --open: oklch(0.48 0.11 258);
   --open-pale: oklch(0.925 0.032 258);
+  --unconfirmed: oklch(0.39 0.09 75);
+  --unconfirmed-pale: oklch(0.93 0.045 78);
   --critical: oklch(0.5 0.18 28);
   --critical-pale: oklch(0.95 0.035 28);
   --focus: oklch(0.55 0.16 247);
@@ -477,6 +479,11 @@ select:hover:not(:disabled) {
 .coverage-tag.is-outdoor {
   background: var(--open-pale);
   color: oklch(0.35 0.1 258);
+}
+
+.coverage-tag.is-unconfirmed {
+  background: var(--unconfirmed-pale);
+  color: var(--unconfirmed);
 }
 
 .venue-name {

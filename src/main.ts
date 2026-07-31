@@ -3,6 +3,8 @@ import 'leaflet/dist/leaflet.css';
 import './styles.css';
 import { pb } from './pocketbase';
 
+type VenueCoverageStatus = 'coberta' | 'aberta' | 'nao_confirmada';
+
 interface Venue {
   id: string;
   slug: string;
@@ -14,6 +16,7 @@ interface Venue {
   courts: number | null;
   surface: string | null;
   indoor: boolean | null;
+  coverage_status?: string | null;
   access_type: string;
   notes_pt: string;
   source_url: string;
@@ -21,6 +24,28 @@ interface Venue {
 }
 
 type Coverage = 'all' | 'indoor' | 'outdoor';
+
+const coveragePresentation: Record<VenueCoverageStatus, {
+  label: string;
+  className: string;
+  markerColor: string;
+}> = {
+  coberta: {
+    label: 'Coberta',
+    className: 'is-indoor',
+    markerColor: '#086c55',
+  },
+  aberta: {
+    label: 'Aberta',
+    className: 'is-outdoor',
+    markerColor: '#2d55a2',
+  },
+  nao_confirmada: {
+    label: 'Cobertura a confirmar',
+    className: 'is-unconfirmed',
+    markerColor: '#8b5d10',
+  },
+};
 
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const initialCenter: L.LatLngExpression = [-23.612, -46.689];
@@ -247,10 +272,11 @@ function setControlsEnabled(enabled: boolean) {
 function getFilteredVenues() {
   return venues.filter((venue) => {
     const matchesNeighborhood = selectedNeighborhood === 'all' || venue.neighborhood === selectedNeighborhood;
+    const coverageStatus = getCoverageStatus(venue);
     const matchesCoverage =
       selectedCoverage === 'all' ||
-      (selectedCoverage === 'indoor' && venue.indoor === true) ||
-      (selectedCoverage === 'outdoor' && venue.indoor !== true);
+      (selectedCoverage === 'indoor' && coverageStatus === 'coberta') ||
+      (selectedCoverage === 'outdoor' && coverageStatus === 'aberta');
 
     return matchesNeighborhood && matchesCoverage;
   });
@@ -290,8 +316,8 @@ function renderDirectory(filteredVenues: Venue[]) {
       <button class="venue-card-button" type="button" aria-label="Ver detalhes de ${escapeAttribute(venue.name)}">
         <span class="venue-card-topline">
           <span class="neighborhood">${escapeHtml(venue.neighborhood)}</span>
-          <span class="coverage-tag ${venue.indoor === true ? 'is-indoor' : 'is-outdoor'}">
-            ${venue.indoor === true ? 'Coberta' : 'Aberta'}
+          <span class="coverage-tag ${getCoveragePresentation(venue).className}">
+            ${getCoveragePresentation(venue).label}
           </span>
         </span>
         <span class="venue-name">${escapeHtml(venue.name)}</span>
@@ -319,16 +345,18 @@ function renderMarkers(filteredVenues: Venue[]) {
   markerLayer.clearLayers();
 
   filteredVenues.forEach((venue) => {
+    const coverage = getCoveragePresentation(venue);
     const marker = L.circleMarker([Number(venue.lat), Number(venue.lng)], {
       radius: 10,
       color: '#ffffff',
       weight: 3,
-      fillColor: venue.indoor === true ? '#086c55' : '#2d55a2',
+      dashArray: coverage.status === 'nao_confirmada' ? '3 2' : undefined,
+      fillColor: coverage.markerColor,
       fillOpacity: 1,
       bubblingMouseEvents: false,
     });
 
-    marker.bindTooltip(venue.name, {
+    marker.bindTooltip(`${venue.name} · ${coverage.label}`, {
       direction: 'top',
       offset: [0, -8],
       opacity: 1,
@@ -340,7 +368,7 @@ function renderMarkers(filteredVenues: Venue[]) {
       if (!markerElement) return;
       markerElement.setAttribute('tabindex', '0');
       markerElement.setAttribute('role', 'button');
-      markerElement.setAttribute('aria-label', `Ver detalhes de ${venue.name}`);
+      markerElement.setAttribute('aria-label', `Ver detalhes de ${venue.name}. ${coverage.label}`);
       markerElement.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -380,6 +408,7 @@ function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
   detailTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
   const directionsUrl = createDirectionsUrl(venue);
   const sourceUrl = safeExternalUrl(venue.source_url);
+  const coverage = getCoveragePresentation(venue);
 
   dialogContent.innerHTML = `
     <div class="dialog-header">
@@ -402,7 +431,7 @@ function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
       </div>
       <div>
         <dt>Cobertura</dt>
-        <dd>${venue.indoor === true ? 'Coberta' : 'Aberta'}</dd>
+        <dd>${coverage.label}</dd>
       </div>
       <div>
         <dt>Acesso</dt>
@@ -448,6 +477,19 @@ function renderError() {
     </div>
   `;
   getElement<HTMLButtonElement>('retry-load').addEventListener('click', () => void loadVenues());
+}
+
+function getCoverageStatus(venue: Venue): VenueCoverageStatus {
+  if (venue.coverage_status === 'coberta' || venue.coverage_status === 'aberta') {
+    return venue.coverage_status;
+  }
+
+  return 'nao_confirmada';
+}
+
+function getCoveragePresentation(venue: Venue) {
+  const status = getCoverageStatus(venue);
+  return { status, ...coveragePresentation[status] };
 }
 
 function formatVenueCount(count: number) {
