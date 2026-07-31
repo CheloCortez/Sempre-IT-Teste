@@ -52,6 +52,11 @@ interface BusyPeriod {
   sampleCount: number;
 }
 
+interface UserLocation {
+  lat: number;
+  lng: number;
+}
+
 const coveragePresentation: Record<VenueCoverageStatus, {
   label: string;
   className: string;
@@ -115,6 +120,8 @@ let venues: Venue[] = [];
 let checkins: Checkin[] = [];
 let selectedNeighborhood = 'all';
 let selectedCoverage: Coverage = 'all';
+let searchQuery = '';
+let userLocation: UserLocation | null = null;
 let detailTrigger: HTMLElement | null = null;
 let openVenueId: string | null = null;
 let cooldownTimer: number | null = null;
@@ -149,24 +156,37 @@ root.innerHTML = `
         <h2 id="filter-title">Filtrar quadras</h2>
         <button class="text-button" id="clear-filters" type="button" hidden>Limpar filtros</button>
       </div>
-      <div class="filter-controls">
-        <label class="select-field">
-          <span>Bairro</span>
-          <select id="neighborhood-filter" disabled>
-            <option value="all">Todos os bairros</option>
-          </select>
-        </label>
-        <fieldset class="coverage-field" disabled>
-          <legend>Cobertura</legend>
-          <div class="segmented-control">
-            <input type="radio" name="coverage" id="coverage-all" value="all" checked>
-            <label for="coverage-all">Todas</label>
-            <input type="radio" name="coverage" id="coverage-indoor" value="indoor">
-            <label for="coverage-indoor">Cobertas</label>
-            <input type="radio" name="coverage" id="coverage-outdoor" value="outdoor">
-            <label for="coverage-outdoor">Abertas</label>
+      <div class="filter-area">
+        <div class="filter-controls">
+          <label class="search-field">
+            <span>Buscar quadra</span>
+            <input id="venue-search" type="search" placeholder="Nome, bairro ou endereço" autocomplete="off" disabled>
+          </label>
+          <label class="select-field">
+            <span>Bairro</span>
+            <select id="neighborhood-filter" disabled>
+              <option value="all">Todos os bairros</option>
+            </select>
+          </label>
+          <fieldset class="coverage-field" disabled>
+            <legend>Cobertura</legend>
+            <div class="segmented-control">
+              <input type="radio" name="coverage" id="coverage-all" value="all" checked>
+              <label for="coverage-all">Todas</label>
+              <input type="radio" name="coverage" id="coverage-indoor" value="indoor">
+              <label for="coverage-indoor">Cobertas</label>
+              <input type="radio" name="coverage" id="coverage-outdoor" value="outdoor">
+              <label for="coverage-outdoor">Abertas</label>
+            </div>
+          </fieldset>
+          <div class="proximity-field">
+            <span>Proximidade</span>
+            <button id="nearby-venues" class="nearby-button" type="button" aria-pressed="false" aria-describedby="location-status" disabled>
+              Quadras perto de mim
+            </button>
           </div>
-        </fieldset>
+        </div>
+        <p id="location-status" class="location-status" aria-live="polite" hidden></p>
       </div>
     </section>
 
@@ -209,9 +229,12 @@ root.innerHTML = `
 `;
 
 const directory = getElement<HTMLElement>('directory');
+const searchInput = getElement<HTMLInputElement>('venue-search');
 const neighborhoodFilter = getElement<HTMLSelectElement>('neighborhood-filter');
 const coverageField = document.querySelector<HTMLFieldSetElement>('.coverage-field');
 const clearFiltersButton = getElement<HTMLButtonElement>('clear-filters');
+const nearbyButton = getElement<HTMLButtonElement>('nearby-venues');
+const locationStatus = getElement<HTMLElement>('location-status');
 const fitMapButton = getElement<HTMLButtonElement>('fit-map');
 const resultCount = getElement<HTMLElement>('result-count');
 const mapSummary = getElement<HTMLElement>('map-summary');
@@ -248,6 +271,11 @@ function initializeMap() {
 }
 
 function attachEvents() {
+  searchInput.addEventListener('input', () => {
+    searchQuery = searchInput.value;
+    renderResults();
+  });
+
   neighborhoodFilter.addEventListener('change', () => {
     selectedNeighborhood = neighborhoodFilter.value;
     renderResults();
@@ -261,12 +289,25 @@ function attachEvents() {
   });
 
   clearFiltersButton.addEventListener('click', () => {
+    searchQuery = '';
     selectedNeighborhood = 'all';
     selectedCoverage = 'all';
+    searchInput.value = '';
     neighborhoodFilter.value = 'all';
     getElement<HTMLInputElement>('coverage-all').checked = true;
     renderResults();
-    neighborhoodFilter.focus();
+    searchInput.focus();
+  });
+
+  nearbyButton.addEventListener('click', () => {
+    if (userLocation) {
+      userLocation = null;
+      updateNearbyControl();
+      setLocationStatus('');
+      renderResults();
+      return;
+    }
+    requestUserLocation();
   });
 
   fitMapButton.addEventListener('click', () => fitMapToVenues(getFilteredVenues()));
@@ -353,13 +394,19 @@ function populateNeighborhoods() {
 }
 
 function setControlsEnabled(enabled: boolean) {
+  searchInput.disabled = !enabled;
   neighborhoodFilter.disabled = !enabled;
   if (coverageField) coverageField.disabled = !enabled;
+  nearbyButton.disabled = !enabled;
   fitMapButton.disabled = !enabled;
 }
 
 function getFilteredVenues() {
-  return venues.filter((venue) => {
+  const normalizedQuery = normalizeSearchText(searchQuery);
+  const filteredVenues = venues.filter((venue) => {
+    const matchesSearch = !normalizedQuery || normalizeSearchText(
+      `${venue.name} ${venue.neighborhood} ${venue.address}`,
+    ).includes(normalizedQuery);
     const matchesNeighborhood = selectedNeighborhood === 'all' || venue.neighborhood === selectedNeighborhood;
     const coverageStatus = getCoverageStatus(venue);
     const matchesCoverage =
@@ -367,21 +414,97 @@ function getFilteredVenues() {
       (selectedCoverage === 'indoor' && coverageStatus === 'coberta') ||
       (selectedCoverage === 'outdoor' && coverageStatus === 'aberta');
 
-    return matchesNeighborhood && matchesCoverage;
+    return matchesSearch && matchesNeighborhood && matchesCoverage;
   });
+
+  if (!userLocation) return filteredVenues;
+  return filteredVenues.sort((a, b) =>
+    getDistanceFromUser(a) - getDistanceFromUser(b) || a.name.localeCompare(b.name, 'pt-BR'),
+  );
 }
 
 function renderResults() {
   const filteredVenues = getFilteredVenues();
-  const hasFilters = selectedNeighborhood !== 'all' || selectedCoverage !== 'all';
-  clearFiltersButton.hidden = !hasFilters;
+  const hasSearch = Boolean(searchQuery.trim());
+  const hasStructuredFilters = selectedNeighborhood !== 'all' || selectedCoverage !== 'all';
+  clearFiltersButton.hidden = !hasSearch && !hasStructuredFilters;
 
   renderDirectory(filteredVenues);
   renderMarkers(filteredVenues);
 
   const countLabel = formatVenueCount(filteredVenues.length);
-  resultCount.textContent = hasFilters ? `${countLabel} com os filtros atuais` : `${countLabel} na região de lançamento`;
+  resultCount.textContent = hasSearch && hasStructuredFilters
+    ? `${countLabel} com a busca e os filtros atuais`
+    : hasSearch
+      ? `${countLabel} para a busca atual`
+      : hasStructuredFilters
+        ? `${countLabel} com os filtros atuais`
+        : `${countLabel} na região de lançamento`;
   mapSummary.textContent = filteredVenues.length ? `${countLabel} no mapa` : 'Nenhuma quadra para mostrar';
+}
+
+function requestUserLocation() {
+  if (!('geolocation' in navigator)) {
+    setLocationStatus('Seu navegador não oferece localização. Use a busca e os filtros para encontrar uma quadra.', 'error');
+    return;
+  }
+
+  nearbyButton.disabled = true;
+  nearbyButton.setAttribute('aria-busy', 'true');
+  nearbyButton.textContent = 'Buscando sua localização…';
+  setLocationStatus('Solicitando sua localização ao navegador.');
+
+  navigator.geolocation.getCurrentPosition(
+    (position) => {
+      const lat = Number(position.coords.latitude);
+      const lng = Number(position.coords.longitude);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+        handleLocationError();
+        return;
+      }
+
+      userLocation = { lat, lng };
+      updateNearbyControl();
+      setLocationStatus('Quadras ordenadas da mais próxima à mais distante. As distâncias são aproximadas.');
+      renderResults();
+    },
+    (error) => handleLocationError(error),
+    { enableHighAccuracy: false, timeout: 10_000, maximumAge: 300_000 },
+  );
+}
+
+function handleLocationError(error?: GeolocationPositionError) {
+  userLocation = null;
+  updateNearbyControl();
+
+  if (error && error.code === error.PERMISSION_DENIED) {
+    setLocationStatus('Não foi possível acessar sua localização. Autorize o acesso no navegador ou continue explorando normalmente.', 'error');
+    return;
+  }
+  if (error && error.code === error.TIMEOUT) {
+    setLocationStatus('A localização demorou para responder. Tente novamente ou continue explorando normalmente.', 'error');
+    return;
+  }
+  if (error && error.code === error.POSITION_UNAVAILABLE) {
+    setLocationStatus('Sua localização não está disponível agora. Continue usando a busca e os filtros normalmente.', 'error');
+    return;
+  }
+  setLocationStatus('Não foi possível obter sua localização agora. A busca e os filtros continuam disponíveis.', 'error');
+}
+
+function updateNearbyControl() {
+  nearbyButton.disabled = false;
+  nearbyButton.removeAttribute('aria-busy');
+  nearbyButton.textContent = 'Quadras perto de mim';
+  nearbyButton.classList.toggle('is-active', Boolean(userLocation));
+  nearbyButton.setAttribute('aria-pressed', String(Boolean(userLocation)));
+}
+
+function setLocationStatus(message: string, type: 'status' | 'error' = 'status') {
+  locationStatus.textContent = message;
+  locationStatus.hidden = !message;
+  locationStatus.classList.toggle('is-error', type === 'error');
+  locationStatus.setAttribute('role', type === 'error' ? 'alert' : 'status');
 }
 
 function renderDirectory(filteredVenues: Venue[]) {
@@ -391,7 +514,7 @@ function renderDirectory(filteredVenues: Venue[]) {
         <span class="status-symbol" aria-hidden="true">○</span>
         <div>
           <strong>Nenhuma quadra encontrada</strong>
-          <p>Tente outro bairro ou veja todos os tipos de cobertura.</p>
+          <p>Tente outro nome, bairro ou endereço, ou veja todos os tipos de cobertura.</p>
           <button class="primary-button" id="empty-clear" type="button">Limpar filtros</button>
         </div>
       </div>
@@ -404,9 +527,12 @@ function renderDirectory(filteredVenues: Venue[]) {
     const activity = getCurrentActivity(venue.id);
     return `
       <article class="venue-card" data-venue-id="${escapeAttribute(venue.id)}">
-        <button class="venue-card-button" type="button" aria-label="Ver detalhes de ${escapeAttribute(venue.name)}">
+        <button class="venue-card-button" type="button" aria-label="Ver detalhes de ${escapeAttribute(venue.name)}${userLocation ? `, a ${escapeAttribute(formatDistance(getDistanceFromUser(venue)))} de você` : ''}">
           <span class="venue-card-topline">
-            <span class="neighborhood">${escapeHtml(venue.neighborhood)}</span>
+            <span class="venue-place">
+              <span class="neighborhood">${escapeHtml(venue.neighborhood)}</span>
+              ${userLocation ? `<span class="venue-distance">${formatDistance(getDistanceFromUser(venue))} de você</span>` : ''}
+            </span>
             <span class="coverage-tag ${getCoveragePresentation(venue).className}">
               ${getCoveragePresentation(venue).label}
             </span>
@@ -455,9 +581,10 @@ function renderMarkers(filteredVenues: Venue[]) {
   filteredVenues.forEach((venue) => {
     const coverage = getCoveragePresentation(venue);
     const activity = getCurrentActivity(venue.id);
+    const distanceLabel = userLocation ? ` ${formatDistance(getDistanceFromUser(venue))} de você.` : '';
     const markerLabel = activity
-      ? `${venue.name}. ${formatPlayerCount(activity.checkin.players_now)}, ${skillLabels[activity.checkin.skill_range]}, relato ${formatRelativeTime(activity.timestamp)}.`
-      : `${venue.name}. ${coverage.label}. Sem atividade recente.`;
+      ? `${venue.name}.${distanceLabel} ${formatPlayerCount(activity.checkin.players_now)}, ${skillLabels[activity.checkin.skill_range]}, relato ${formatRelativeTime(activity.timestamp)}.`
+      : `${venue.name}.${distanceLabel} ${coverage.label}. Sem atividade recente.`;
     const marker = L.marker([Number(venue.lat), Number(venue.lng)], {
       icon: L.divIcon({
         className: 'venue-map-icon',
@@ -1212,6 +1339,36 @@ function formatPlayerCount(value: number) {
 function formatAveragePlayers(value: number) {
   const rounded = Math.round(value * 10) / 10;
   return `média de ${rounded.toLocaleString('pt-BR')} ${rounded === 1 ? 'jogador' : 'jogadores'}`;
+}
+
+function normalizeSearchText(value: string) {
+  return value
+    .normalize('NFD')
+    .replace(/\p{Diacritic}/gu, '')
+    .toLocaleLowerCase('pt-BR')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function getDistanceFromUser(venue: Venue) {
+  if (!userLocation) return Number.POSITIVE_INFINITY;
+
+  const earthRadiusKm = 6371.0088;
+  const toRadians = (degrees: number) => degrees * Math.PI / 180;
+  const lat1 = toRadians(userLocation.lat);
+  const lat2 = toRadians(Number(venue.lat));
+  const latDelta = lat2 - lat1;
+  const lngDelta = toRadians(Number(venue.lng) - userLocation.lng);
+  const haversine = Math.sin(latDelta / 2) ** 2 +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(lngDelta / 2) ** 2;
+  const normalizedHaversine = Math.min(1, Math.max(0, haversine));
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(normalizedHaversine), Math.sqrt(1 - normalizedHaversine));
+}
+
+function formatDistance(distanceKm: number) {
+  if (distanceKm < 1) return `${Math.round(distanceKm * 1000)} m`;
+  return `${distanceKm.toLocaleString('pt-BR', { maximumFractionDigits: 1 })} km`;
 }
 
 function formatMarkerCount(value: number) {
