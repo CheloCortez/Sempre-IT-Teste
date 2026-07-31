@@ -4,6 +4,9 @@ import './styles.css';
 import { pb } from './pocketbase';
 
 type VenueCoverageStatus = 'coberta' | 'aberta' | 'nao_confirmada';
+type Coverage = 'all' | 'indoor' | 'outdoor';
+type CrowdLevel = 'vazia' | 'moderada' | 'cheia';
+type SkillRange = 'iniciante' | 'intermediario' | 'avancado' | 'misto';
 
 interface Venue {
   id: string;
@@ -23,7 +26,30 @@ interface Venue {
   active: boolean;
 }
 
-type Coverage = 'all' | 'indoor' | 'outdoor';
+interface Checkin {
+  id: string;
+  venue: string;
+  players_now: number;
+  crowd_level: CrowdLevel;
+  skill_range: SkillRange;
+  wait_minutes?: number | null;
+  display_name?: string;
+  note?: string;
+  created?: string;
+}
+
+interface ActivitySnapshot {
+  checkin: Checkin;
+  timestamp: number;
+}
+
+interface BusyPeriod {
+  weekday: string;
+  weekdayIndex: number;
+  hour: number;
+  averagePlayers: number;
+  sampleCount: number;
+}
 
 const coveragePresentation: Record<VenueCoverageStatus, {
   label: string;
@@ -47,14 +73,51 @@ const coveragePresentation: Record<VenueCoverageStatus, {
   },
 };
 
+const skillLabels: Record<SkillRange, string> = {
+  iniciante: 'iniciante',
+  intermediario: 'intermediário',
+  avancado: 'avançado',
+  misto: 'nível misto',
+};
+
+const crowdLabels: Record<CrowdLevel, string> = {
+  vazia: 'vazia',
+  moderada: 'movimento moderado',
+  cheia: 'cheia',
+};
+
+const weekdayOrder: Record<string, number> = {
+  domingo: 0,
+  'segunda-feira': 1,
+  'terça-feira': 2,
+  'quarta-feira': 3,
+  'quinta-feira': 4,
+  'sexta-feira': 5,
+  sábado: 6,
+};
+
+const ACTIVE_WINDOW_MS = 90 * 60 * 1000;
+const COOLDOWN_MS = 10 * 60 * 1000;
+const COOLDOWN_STORAGE_PREFIX = 'pickleworld-checkin:';
 const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 const initialCenter: L.LatLngExpression = [-23.612, -46.689];
+const saoPauloBucketFormatter = new Intl.DateTimeFormat('pt-BR', {
+  timeZone: 'America/Sao_Paulo',
+  weekday: 'long',
+  hour: '2-digit',
+  hourCycle: 'h23',
+});
+
 let map: LeafletMap;
 let markerLayer: L.LayerGroup;
 let venues: Venue[] = [];
+let checkins: Checkin[] = [];
 let selectedNeighborhood = 'all';
 let selectedCoverage: Coverage = 'all';
 let detailTrigger: HTMLElement | null = null;
+let openVenueId: string | null = null;
+let cooldownTimer: number | null = null;
+let activityDataAvailable = true;
 
 const root = document.querySelector<HTMLElement>('#app');
 
@@ -77,7 +140,7 @@ root.innerHTML = `
         <p class="kicker">Seu próximo jogo começa aqui</p>
         <h1 id="page-title">Encontre uma quadra e vá jogar.</h1>
       </div>
-      <p class="intro-copy">Explore espaços da região de lançamento, compare a cobertura e abra a rota sem perder tempo.</p>
+      <p class="intro-copy">Explore espaços da região de lançamento, veja relatos recentes de movimento e abra a rota sem perder tempo.</p>
     </section>
 
     <section class="filters" aria-labelledby="filter-title">
@@ -155,7 +218,7 @@ const dialogContent = getElement<HTMLElement>('dialog-content');
 
 initializeMap();
 attachEvents();
-void loadVenues();
+void loadData();
 
 function getElement<T extends HTMLElement>(id: string): T {
   const element = document.getElementById(id);
@@ -210,12 +273,14 @@ function attachEvents() {
   });
 
   dialog.addEventListener('close', () => {
+    clearCooldownTimer();
+    openVenueId = null;
     detailTrigger?.focus();
     detailTrigger = null;
   });
 }
 
-async function loadVenues() {
+async function loadData() {
   setControlsEnabled(false);
   directory.setAttribute('aria-busy', 'true');
 
@@ -228,6 +293,14 @@ async function loadVenues() {
 
     venues = records.filter(isUsableVenue);
     populateNeighborhoods();
+
+    try {
+      await refreshCheckins(false);
+    } catch (error) {
+      activityDataAvailable = false;
+      console.error('Falha ao carregar atividade:', error);
+    }
+
     setControlsEnabled(true);
     renderResults();
   } catch (error) {
@@ -236,6 +309,18 @@ async function loadVenues() {
   } finally {
     directory.setAttribute('aria-busy', 'false');
   }
+}
+
+async function refreshCheckins(render = true) {
+  const knownCreated = new Map(checkins.map((checkin) => [checkin.id, checkin.created]));
+  const records = await pb.collection('checkins').getFullList<Checkin>({
+    requestKey: 'all-checkins',
+  });
+  checkins = records
+    .filter((checkin) => Boolean(checkin.id && checkin.venue))
+    .map((checkin) => checkin.created ? checkin : { ...checkin, created: knownCreated.get(checkin.id) });
+  activityDataAvailable = true;
+  if (render) renderResults();
 }
 
 function isUsableVenue(venue: Venue) {
@@ -311,26 +396,30 @@ function renderDirectory(filteredVenues: Venue[]) {
     return;
   }
 
-  directory.innerHTML = filteredVenues.map((venue) => `
-    <article class="venue-card" data-venue-id="${escapeAttribute(venue.id)}">
-      <button class="venue-card-button" type="button" aria-label="Ver detalhes de ${escapeAttribute(venue.name)}">
-        <span class="venue-card-topline">
-          <span class="neighborhood">${escapeHtml(venue.neighborhood)}</span>
-          <span class="coverage-tag ${getCoveragePresentation(venue).className}">
-            ${getCoveragePresentation(venue).label}
+  directory.innerHTML = filteredVenues.map((venue) => {
+    const activity = getCurrentActivity(venue.id);
+    return `
+      <article class="venue-card" data-venue-id="${escapeAttribute(venue.id)}">
+        <button class="venue-card-button" type="button" aria-label="Ver detalhes de ${escapeAttribute(venue.name)}">
+          <span class="venue-card-topline">
+            <span class="neighborhood">${escapeHtml(venue.neighborhood)}</span>
+            <span class="coverage-tag ${getCoveragePresentation(venue).className}">
+              ${getCoveragePresentation(venue).label}
+            </span>
           </span>
-        </span>
-        <span class="venue-name">${escapeHtml(venue.name)}</span>
-        <span class="venue-address">${escapeHtml(venue.address)}</span>
-        <span class="venue-meta">
-          <span>${formatCourtCount(venue.courts)}</span>
-          <span aria-hidden="true">·</span>
-          <span>${formatAccessType(venue.access_type)}</span>
-        </span>
-        <span class="card-action">Ver detalhes <span aria-hidden="true">→</span></span>
-      </button>
-    </article>
-  `).join('');
+          <span class="venue-name">${escapeHtml(venue.name)}</span>
+          <span class="venue-address">${escapeHtml(venue.address)}</span>
+          ${renderDirectoryActivity(activity)}
+          <span class="venue-meta">
+            <span>${formatCourtCount(venue.courts)}</span>
+            <span aria-hidden="true">·</span>
+            <span>${formatAccessType(venue.access_type)}</span>
+          </span>
+          <span class="card-action">Ver detalhes <span aria-hidden="true">→</span></span>
+        </button>
+      </article>
+    `;
+  }).join('');
 
   directory.querySelectorAll<HTMLButtonElement>('.venue-card-button').forEach((button) => {
     button.addEventListener('click', () => {
@@ -341,24 +430,49 @@ function renderDirectory(filteredVenues: Venue[]) {
   });
 }
 
+function renderDirectoryActivity(activity: ActivitySnapshot | null) {
+  if (!activity) {
+    const label = activityDataAvailable ? 'Sem relato nos últimos 90 min' : 'Atividade indisponível agora';
+    return `<span class="venue-activity is-quiet"><span class="activity-dot" aria-hidden="true"></span>${label}</span>`;
+  }
+
+  return `
+    <span class="venue-activity is-live">
+      <span class="activity-dot" aria-hidden="true"></span>
+      <strong>${formatPlayerCount(activity.checkin.players_now)}</strong>
+      <span>· ${escapeHtml(skillLabels[activity.checkin.skill_range])} · ${formatRelativeTime(activity.timestamp)}</span>
+    </span>
+  `;
+}
+
 function renderMarkers(filteredVenues: Venue[]) {
   markerLayer.clearLayers();
 
   filteredVenues.forEach((venue) => {
     const coverage = getCoveragePresentation(venue);
-    const marker = L.circleMarker([Number(venue.lat), Number(venue.lng)], {
-      radius: 10,
-      color: '#ffffff',
-      weight: 3,
-      dashArray: coverage.status === 'nao_confirmada' ? '3 2' : undefined,
-      fillColor: coverage.markerColor,
-      fillOpacity: 1,
+    const activity = getCurrentActivity(venue.id);
+    const markerLabel = activity
+      ? `${venue.name}. ${formatPlayerCount(activity.checkin.players_now)}, ${skillLabels[activity.checkin.skill_range]}, relato ${formatRelativeTime(activity.timestamp)}.`
+      : `${venue.name}. ${coverage.label}. Sem atividade recente.`;
+    const marker = L.marker([Number(venue.lat), Number(venue.lng)], {
+      icon: L.divIcon({
+        className: 'venue-map-icon',
+        html: `
+          <span class="map-marker ${activity ? 'has-activity' : ''}" style="--marker-color: ${coverage.markerColor}">
+            <span class="marker-core" aria-hidden="true"></span>
+            ${activity ? `<span class="marker-count" aria-hidden="true">${formatMarkerCount(activity.checkin.players_now)}</span>` : ''}
+          </span>
+        `,
+        iconSize: [44, 44],
+        iconAnchor: [22, 22],
+      }),
       bubblingMouseEvents: false,
+      keyboard: false,
     });
 
-    marker.bindTooltip(`${venue.name} · ${coverage.label}`, {
+    marker.bindTooltip(markerLabel, {
       direction: 'top',
-      offset: [0, -8],
+      offset: [0, -18],
       opacity: 1,
     });
 
@@ -368,7 +482,7 @@ function renderMarkers(filteredVenues: Venue[]) {
       if (!markerElement) return;
       markerElement.setAttribute('tabindex', '0');
       markerElement.setAttribute('role', 'button');
-      markerElement.setAttribute('aria-label', `Ver detalhes de ${venue.name}. ${coverage.label}`);
+      markerElement.setAttribute('aria-label', `Ver detalhes de ${markerLabel}`);
       markerElement.addEventListener('keydown', (event) => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -406,9 +520,20 @@ function fitMapToVenues(filteredVenues: Venue[]) {
 
 function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
   detailTrigger = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+  openVenueId = venue.id;
+  renderVenueDetail(venue);
+  if (!dialog.open) dialog.showModal();
+  dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.focus();
+}
+
+function renderVenueDetail(venue: Venue, formMessage?: { type: 'success' | 'error'; text: string }) {
+  clearCooldownTimer();
   const directionsUrl = createDirectionsUrl(venue);
   const sourceUrl = safeExternalUrl(venue.source_url);
   const coverage = getCoveragePresentation(venue);
+  const activity = getCurrentActivity(venue.id);
+  const busyPeriods = getBusyPeriods(venue.id);
+  const cooldownRemaining = getCooldownRemaining(venue.id);
 
   dialogContent.innerHTML = `
     <div class="dialog-header">
@@ -418,6 +543,8 @@ function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
       </div>
       <button class="dialog-close" type="button" aria-label="Fechar detalhes">×</button>
     </div>
+
+    ${renderDetailActivity(activity)}
 
     <div class="detail-address">
       <span>Endereço</span>
@@ -444,6 +571,9 @@ function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
       <p>${venue.notes_pt ? escapeHtml(venue.notes_pt) : 'Não há observações adicionais para este local.'}</p>
     </div>
 
+    ${renderBusyPeriods(busyPeriods)}
+    ${renderCheckinForm(venue, cooldownRemaining, formMessage)}
+
     <div class="dialog-actions">
       <a class="primary-button" href="${escapeAttribute(directionsUrl)}" target="_blank" rel="noopener noreferrer">
         Abrir rota no Google Maps
@@ -457,9 +587,408 @@ function openVenueDetail(venue: Venue, trigger?: HTMLElement) {
   `;
 
   dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.addEventListener('click', () => dialog.close());
+  dialogContent.querySelector<HTMLFormElement>('#checkin-form')?.addEventListener('submit', (event) => {
+    void submitCheckin(event, venue);
+  });
+  startCooldownTicker(venue.id);
+}
 
-  if (!dialog.open) dialog.showModal();
-  dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.focus();
+function renderDetailActivity(activity: ActivitySnapshot | null) {
+  if (!activity) {
+    const copy = activityDataAvailable
+      ? 'Ainda não há relato feito nos últimos 90 minutos. Envie um check-in se você estiver no local.'
+      : 'Não foi possível consultar os relatos agora. Tente novamente em instantes.';
+    return `
+      <section class="current-activity is-quiet" aria-labelledby="current-activity-title">
+        <div class="activity-heading">
+          <h3 id="current-activity-title">Atividade agora</h3>
+          <span>Sem relato recente</span>
+        </div>
+        <p>${copy}</p>
+      </section>
+    `;
+  }
+
+  const wait = Number(activity.checkin.wait_minutes);
+  return `
+    <section class="current-activity is-live" aria-labelledby="current-activity-title">
+      <div class="activity-heading">
+        <h3 id="current-activity-title">Atividade agora</h3>
+        <span>${formatRelativeTime(activity.timestamp)}</span>
+      </div>
+      <p class="activity-lead"><strong>${formatPlayerCount(activity.checkin.players_now)}</strong> · ${escapeHtml(crowdLabels[activity.checkin.crowd_level])}</p>
+      <p>Nível relatado: <strong>${escapeHtml(skillLabels[activity.checkin.skill_range])}</strong>${Number.isFinite(wait) && wait > 0 ? ` · espera de ${Math.round(wait)} min` : ''}.</p>
+      ${activity.checkin.note ? `<blockquote>“${escapeHtml(activity.checkin.note)}”${activity.checkin.display_name ? `<cite> — ${escapeHtml(activity.checkin.display_name)}</cite>` : ''}</blockquote>` : ''}
+    </section>
+  `;
+}
+
+function renderBusyPeriods(periods: BusyPeriod[]) {
+  if (!periods.length) {
+    return `
+      <section class="busy-periods" aria-labelledby="busy-periods-title">
+        <div class="section-heading-row">
+          <h3 id="busy-periods-title">Quando costuma movimentar</h3>
+          <span>Horário de São Paulo</span>
+        </div>
+        <div class="pattern-empty">
+          <strong>Ainda não há relatos suficientes</strong>
+          <p>Mostraremos um padrão quando houver pelo menos 3 relatos na mesma faixa de dia e hora, com uma base mínima de 6 relatos válidos.</p>
+        </div>
+      </section>
+    `;
+  }
+
+  return `
+    <section class="busy-periods" aria-labelledby="busy-periods-title">
+      <div class="section-heading-row">
+        <h3 id="busy-periods-title">Quando costuma movimentar</h3>
+        <span>Horário de São Paulo</span>
+      </div>
+      <p class="pattern-rationale">Faixas com pelo menos 3 relatos, ordenadas pela média de jogadores observada. É um histórico da comunidade, não uma garantia.</p>
+      <ul class="period-list">
+        ${periods.map((period) => `
+          <li>
+            <span><strong>${capitalize(period.weekday)}</strong>, ${String(period.hour).padStart(2, '0')}:00–${String((period.hour + 1) % 24).padStart(2, '0')}:00</span>
+            <span>${formatAveragePlayers(period.averagePlayers)} · ${period.sampleCount} relatos</span>
+          </li>
+        `).join('')}
+      </ul>
+    </section>
+  `;
+}
+
+function renderCheckinForm(
+  venue: Venue,
+  cooldownRemaining: number,
+  formMessage?: { type: 'success' | 'error'; text: string },
+) {
+  const cooldownActive = cooldownRemaining > 0;
+  return `
+    <section class="checkin-section" aria-labelledby="checkin-title">
+      <div class="checkin-intro">
+        <div>
+          <h3 id="checkin-title">Conte como está agora</h3>
+          <p>Seu relato anônimo ajuda quem está escolhendo onde jogar. Campos com * são obrigatórios.</p>
+        </div>
+        <span class="checkin-window">Vale por 90 min</span>
+      </div>
+
+      <form id="checkin-form" novalidate data-venue-id="${escapeAttribute(venue.id)}">
+        <div class="form-grid">
+          <label class="form-field">
+            <span>Jogadores agora *</span>
+            <input id="players-now" name="players_now" type="number" min="0" max="100" step="1" inputmode="numeric" required aria-describedby="players-help">
+            <small id="players-help">Inclua quem está em quadra e esperando para jogar.</small>
+          </label>
+
+          <label class="form-field">
+            <span>Espera em minutos</span>
+            <input name="wait_minutes" type="number" min="0" max="240" step="1" inputmode="numeric" placeholder="0">
+          </label>
+        </div>
+
+        <fieldset class="choice-field">
+          <legend>Movimento *</legend>
+          <div class="choice-options">
+            ${renderRadioOption('crowd_level', 'vazia', 'Vazia', true)}
+            ${renderRadioOption('crowd_level', 'moderada', 'Moderada')}
+            ${renderRadioOption('crowd_level', 'cheia', 'Cheia')}
+          </div>
+        </fieldset>
+
+        <fieldset class="choice-field">
+          <legend>Nível de quem está jogando *</legend>
+          <div class="choice-options skill-options">
+            ${renderRadioOption('skill_range', 'iniciante', 'Iniciante', true)}
+            ${renderRadioOption('skill_range', 'intermediario', 'Intermediário')}
+            ${renderRadioOption('skill_range', 'avancado', 'Avançado')}
+            ${renderRadioOption('skill_range', 'misto', 'Misto')}
+          </div>
+        </fieldset>
+
+        <div class="form-grid">
+          <label class="form-field">
+            <span>Seu nome <em>opcional</em></span>
+            <input name="display_name" type="text" maxlength="40" autocomplete="nickname" placeholder="Como quer aparecer">
+          </label>
+
+          <label class="form-field form-field-wide">
+            <span>Nota curta <em>opcional</em></span>
+            <textarea name="note" maxlength="160" rows="3" placeholder="Ex.: duas quadras livres"></textarea>
+          </label>
+        </div>
+
+        <div id="checkin-status" class="form-status ${formMessage ? `is-${formMessage.type}` : ''}" role="status" aria-live="polite" tabindex="-1">
+          ${formMessage ? escapeHtml(formMessage.text) : ''}
+        </div>
+
+        <div class="submit-row">
+          <button class="primary-button checkin-submit" type="submit" ${cooldownActive ? 'disabled' : ''}>
+            ${cooldownActive ? `Novo relato em ${formatCooldown(cooldownRemaining)}` : 'Enviar relato agora'}
+          </button>
+          <p id="cooldown-copy">${cooldownActive ? 'Você já enviou um relato aqui. Aguarde 10 minutos para enviar outro.' : 'Sem cadastro. Um novo envio neste local fica disponível após 10 minutos.'}</p>
+        </div>
+      </form>
+    </section>
+  `;
+}
+
+function renderRadioOption(name: string, value: string, label: string, required = false) {
+  const id = `checkin-${name}-${value}`;
+  return `
+    <label for="${id}">
+      <input id="${id}" type="radio" name="${name}" value="${value}" ${required ? 'required' : ''}>
+      <span>${label}</span>
+    </label>
+  `;
+}
+
+async function submitCheckin(event: SubmitEvent, venue: Venue) {
+  event.preventDefault();
+  const form = event.currentTarget as HTMLFormElement;
+  if (!form.reportValidity()) return;
+
+  const cooldownRemaining = getCooldownRemaining(venue.id);
+  if (cooldownRemaining > 0) {
+    setFormStatus('error', `Aguarde ${formatCooldown(cooldownRemaining)} para enviar outro relato neste local.`);
+    applyCooldownState(cooldownRemaining);
+    return;
+  }
+
+  const submitButton = form.querySelector<HTMLButtonElement>('.checkin-submit');
+  const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input, textarea, button');
+  controls.forEach((control) => { control.disabled = true; });
+  if (submitButton) submitButton.textContent = 'Enviando relato…';
+  setFormStatus('', '');
+
+  const data = new FormData(form);
+  const players = Number(data.get('players_now'));
+  const waitValue = String(data.get('wait_minutes') ?? '').trim();
+  const payload: Record<string, string | number> = {
+    venue: venue.id,
+    players_now: players,
+    crowd_level: String(data.get('crowd_level')),
+    skill_range: String(data.get('skill_range')),
+  };
+
+  if (waitValue) payload.wait_minutes = Number(waitValue);
+  const displayName = String(data.get('display_name') ?? '').trim();
+  const note = String(data.get('note') ?? '').trim();
+  if (displayName) payload.display_name = displayName;
+  if (note) payload.note = note;
+
+  try {
+    const created = await pb.collection('checkins').create<Checkin>(payload, { requestKey: null });
+    const createdWithTimestamp = created.created ? created : { ...created, created: new Date().toISOString() };
+    checkins = [createdWithTimestamp, ...checkins.filter((checkin) => checkin.id !== created.id)];
+    setCooldown(venue.id);
+
+    try {
+      await refreshCheckins(false);
+    } catch (refreshError) {
+      console.error('Falha ao atualizar relatos após o envio:', refreshError);
+      checkins = [createdWithTimestamp, ...checkins.filter((checkin) => checkin.id !== created.id)];
+    }
+
+    renderResults();
+    const currentVenue = venues.find((item) => item.id === openVenueId);
+    if (currentVenue) {
+      renderVenueDetail(currentVenue, { type: 'success', text: 'Relato enviado. A atividade foi atualizada para todo mundo.' });
+      dialogContent.querySelector<HTMLElement>('#checkin-status')?.focus();
+    }
+  } catch (error) {
+    controls.forEach((control) => { control.disabled = false; });
+    if (isCooldownError(error)) {
+      setCooldown(venue.id);
+      applyCooldownState(COOLDOWN_MS);
+      startCooldownTicker(venue.id);
+    } else if (submitButton) {
+      submitButton.textContent = 'Enviar relato agora';
+    }
+    setFormStatus('error', getCheckinErrorMessage(error));
+  }
+}
+
+function setFormStatus(type: '' | 'success' | 'error', message: string) {
+  const status = dialogContent.querySelector<HTMLElement>('#checkin-status');
+  if (!status) return;
+  status.className = `form-status${type ? ` is-${type}` : ''}`;
+  status.textContent = message;
+  if (type === 'error') status.setAttribute('role', 'alert');
+  else status.setAttribute('role', 'status');
+}
+
+function getCheckinErrorMessage(error: unknown) {
+  const candidate = error as { status?: number };
+  if (isCooldownError(error)) {
+    return 'Um relato foi enviado há pouco para este local. Aguarde 10 minutos antes de tentar novamente.';
+  }
+
+  if (candidate?.status === 400) {
+    return 'Confira os campos do relato e tente novamente. Jogadores, movimento e nível são obrigatórios.';
+  }
+
+  return 'Não foi possível enviar agora. Verifique sua conexão e tente novamente.';
+}
+
+function isCooldownError(error: unknown) {
+  const candidate = error as { status?: number; message?: string; data?: { message?: string; data?: Record<string, { message?: string }> } };
+  const combinedMessage = [
+    candidate?.message,
+    candidate?.data?.message,
+    ...Object.values(candidate?.data?.data ?? {}).map((item) => item?.message),
+  ].filter(Boolean).join(' ').toLocaleLowerCase('pt-BR');
+  return candidate?.status === 429 || /cooldown|aguarde|recent|muitas|too many|rate/.test(combinedMessage);
+}
+
+function getCurrentActivity(venueId: string): ActivitySnapshot | null {
+  const cutoff = Date.now() - ACTIVE_WINDOW_MS;
+  let newest: ActivitySnapshot | null = null;
+
+  for (const checkin of checkins) {
+    if (checkin.venue !== venueId || !isValidActivityCheckin(checkin)) continue;
+    const timestamp = parseCreatedTimestamp(checkin.created);
+    if (timestamp === null || timestamp < cutoff || timestamp > Date.now() + 60_000) continue;
+    if (!newest || timestamp > newest.timestamp) newest = { checkin, timestamp };
+  }
+
+  return newest;
+}
+
+function getBusyPeriods(venueId: string): BusyPeriod[] {
+  const buckets = new Map<string, { weekday: string; weekdayIndex: number; hour: number; players: number[] }>();
+  let validReportCount = 0;
+
+  for (const checkin of checkins) {
+    if (checkin.venue !== venueId || !isValidActivityCheckin(checkin)) continue;
+    const timestamp = parseCreatedTimestamp(checkin.created);
+    if (timestamp === null || timestamp > Date.now() + 60_000) continue;
+    const bucket = getSaoPauloBucket(timestamp);
+    if (!bucket) continue;
+    validReportCount += 1;
+    const key = `${bucket.weekdayIndex}-${bucket.hour}`;
+    const existing = buckets.get(key) ?? { ...bucket, players: [] };
+    existing.players.push(Number(checkin.players_now));
+    buckets.set(key, existing);
+  }
+
+  if (validReportCount < 6) return [];
+
+  return [...buckets.values()]
+    .filter((bucket) => bucket.players.length >= 3)
+    .map((bucket) => ({
+      weekday: bucket.weekday,
+      weekdayIndex: bucket.weekdayIndex,
+      hour: bucket.hour,
+      averagePlayers: bucket.players.reduce((sum, players) => sum + players, 0) / bucket.players.length,
+      sampleCount: bucket.players.length,
+    }))
+    .sort((a, b) => b.averagePlayers - a.averagePlayers || b.sampleCount - a.sampleCount || a.weekdayIndex - b.weekdayIndex || a.hour - b.hour)
+    .slice(0, 4);
+}
+
+function getSaoPauloBucket(timestamp: number) {
+  const parts = saoPauloBucketFormatter.formatToParts(new Date(timestamp));
+  const weekday = parts.find((part) => part.type === 'weekday')?.value.toLocaleLowerCase('pt-BR');
+  const hour = Number(parts.find((part) => part.type === 'hour')?.value);
+  if (!weekday || weekdayOrder[weekday] === undefined || !Number.isInteger(hour) || hour < 0 || hour > 23) return null;
+  return { weekday, weekdayIndex: weekdayOrder[weekday], hour };
+}
+
+function isValidActivityCheckin(checkin: Checkin) {
+  const players = Number(checkin.players_now);
+  return Number.isFinite(players) && players >= 0 && players <= 100 &&
+    checkin.crowd_level in crowdLabels && checkin.skill_range in skillLabels;
+}
+
+function parseCreatedTimestamp(value?: string) {
+  if (!value || typeof value !== 'string') return null;
+  const timestamp = Date.parse(value);
+  return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function getCooldownRemaining(venueId: string) {
+  try {
+    const stored = window.localStorage.getItem(`${COOLDOWN_STORAGE_PREFIX}${venueId}`);
+    if (!stored) return 0;
+    const timestamp = Number(stored);
+    if (!Number.isFinite(timestamp) || timestamp > Date.now() + 60_000) {
+      window.localStorage.removeItem(`${COOLDOWN_STORAGE_PREFIX}${venueId}`);
+      return 0;
+    }
+    return Math.max(0, COOLDOWN_MS - (Date.now() - timestamp));
+  } catch {
+    return 0;
+  }
+}
+
+function setCooldown(venueId: string) {
+  try {
+    window.localStorage.setItem(`${COOLDOWN_STORAGE_PREFIX}${venueId}`, String(Date.now()));
+  } catch {
+    // Storage can be unavailable in private browsing; server validation remains authoritative.
+  }
+}
+
+function startCooldownTicker(venueId: string) {
+  clearCooldownTimer();
+  applyCooldownState(getCooldownRemaining(venueId));
+  cooldownTimer = window.setInterval(() => {
+    const remaining = getCooldownRemaining(venueId);
+    applyCooldownState(remaining);
+    if (remaining <= 0) clearCooldownTimer();
+  }, 1000);
+}
+
+function applyCooldownState(remaining: number) {
+  const submitButton = dialogContent.querySelector<HTMLButtonElement>('.checkin-submit');
+  const copy = dialogContent.querySelector<HTMLElement>('#cooldown-copy');
+  if (!submitButton || !copy) return;
+  const active = remaining > 0;
+  submitButton.disabled = active;
+  submitButton.textContent = active ? `Novo relato em ${formatCooldown(remaining)}` : 'Enviar relato agora';
+  copy.textContent = active
+    ? 'Você já enviou um relato aqui. Aguarde 10 minutos para enviar outro.'
+    : 'Sem cadastro. Um novo envio neste local fica disponível após 10 minutos.';
+}
+
+function clearCooldownTimer() {
+  if (cooldownTimer !== null) window.clearInterval(cooldownTimer);
+  cooldownTimer = null;
+}
+
+function formatCooldown(milliseconds: number) {
+  const totalSeconds = Math.max(0, Math.ceil(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${String(seconds).padStart(2, '0')}`;
+}
+
+function formatRelativeTime(timestamp: number) {
+  const minutes = Math.max(0, Math.floor((Date.now() - timestamp) / 60_000));
+  if (minutes < 1) return 'agora mesmo';
+  if (minutes === 1) return 'há 1 min';
+  return `há ${minutes} min`;
+}
+
+function formatPlayerCount(value: number) {
+  const count = Math.max(0, Math.round(Number(value)));
+  return `${count} ${count === 1 ? 'jogador' : 'jogadores'}`;
+}
+
+function formatAveragePlayers(value: number) {
+  const rounded = Math.round(value * 10) / 10;
+  return `média de ${rounded.toLocaleString('pt-BR')} ${rounded === 1 ? 'jogador' : 'jogadores'}`;
+}
+
+function formatMarkerCount(value: number) {
+  const count = Math.max(0, Math.round(Number(value)));
+  return count > 99 ? '99+' : String(count);
+}
+
+function capitalize(value: string) {
+  return value.replace(/^./u, (letter) => letter.toLocaleUpperCase('pt-BR'));
 }
 
 function renderError() {
@@ -476,14 +1005,13 @@ function renderError() {
       </div>
     </div>
   `;
-  getElement<HTMLButtonElement>('retry-load').addEventListener('click', () => void loadVenues());
+  getElement<HTMLButtonElement>('retry-load').addEventListener('click', () => void loadData());
 }
 
 function getCoverageStatus(venue: Venue): VenueCoverageStatus {
   if (venue.coverage_status === 'coberta' || venue.coverage_status === 'aberta') {
     return venue.coverage_status;
   }
-
   return 'nao_confirmada';
 }
 
@@ -512,7 +1040,6 @@ function formatAccessType(accessType: string) {
     acesso_livre: 'Acesso livre',
     socios_e_convidados: 'Sócios e convidados',
   };
-
   if (labels[accessType]) return labels[accessType];
   return accessType
     ? accessType.replaceAll('_', ' ').replace(/^./, (letter) => letter.toLocaleUpperCase('pt-BR'))
@@ -533,7 +1060,7 @@ function safeExternalUrl(value: string) {
   }
 }
 
-function escapeHtml(value: string) {
+function escapeHtml(value: unknown) {
   return String(value)
     .replaceAll('&', '&amp;')
     .replaceAll('<', '&lt;')
@@ -542,6 +1069,6 @@ function escapeHtml(value: string) {
     .replaceAll("'", '&#039;');
 }
 
-function escapeAttribute(value: string) {
+function escapeAttribute(value: unknown) {
   return escapeHtml(value);
 }
