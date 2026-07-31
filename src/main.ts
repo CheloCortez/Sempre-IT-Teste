@@ -756,13 +756,12 @@ async function submitCheckin(form: HTMLFormElement, venue: Venue) {
     return;
   }
 
+  const data = new FormData(form);
   const submitButton = form.querySelector<HTMLButtonElement>('.checkin-submit');
   const controls = form.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLButtonElement>('input, textarea, button');
   controls.forEach((control) => { control.disabled = true; });
   if (submitButton) submitButton.textContent = 'Enviando relato…';
   setFormStatus('', '');
-
-  const data = new FormData(form);
   const players = Number(data.get('players_now'));
   const waitValue = String(data.get('wait_minutes') ?? '').trim();
   const payload: Record<string, string | number> = {
