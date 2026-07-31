@@ -588,7 +588,9 @@ function renderVenueDetail(venue: Venue, formMessage?: { type: 'success' | 'erro
 
   dialogContent.querySelector<HTMLButtonElement>('.dialog-close')?.addEventListener('click', () => dialog.close());
   dialogContent.querySelector<HTMLFormElement>('#checkin-form')?.addEventListener('submit', (event) => {
-    void submitCheckin(event, venue);
+    event.preventDefault();
+    const form = event.currentTarget;
+    if (form instanceof HTMLFormElement) void submitCheckin(form, venue);
   });
   startCooldownTicker(venue.id);
 }
@@ -744,9 +746,7 @@ function renderRadioOption(name: string, value: string, label: string, required 
   `;
 }
 
-async function submitCheckin(event: SubmitEvent, venue: Venue) {
-  event.preventDefault();
-  const form = event.currentTarget as HTMLFormElement;
+async function submitCheckin(form: HTMLFormElement, venue: Venue) {
   if (!form.reportValidity()) return;
 
   const cooldownRemaining = getCooldownRemaining(venue.id);
